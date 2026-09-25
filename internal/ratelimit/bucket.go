@@ -52,3 +52,10 @@ func (b *Bucket) Allow(now time.Time) (allowed bool, remaining int, retryAfter t
 	waitSeconds := (1 - b.tokens) / b.refillRate
 	return false, 0, time.Duration(math.Ceil(waitSeconds * float64(time.Second)))
 }
+
+// timeUntilFull reports how long it takes the current bucket to refill to
+// capacity. Callers must hold the limiter lock while using this method.
+func (b *Bucket) timeUntilFull() time.Duration {
+	waitSeconds := (b.capacity - b.tokens) / b.refillRate
+	return time.Duration(math.Ceil(waitSeconds * float64(time.Second)))
+}

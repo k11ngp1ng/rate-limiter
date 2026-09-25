@@ -10,6 +10,7 @@ type Decision struct {
 	Allowed    bool
 	Remaining  int
 	RetryAfter time.Duration
+	ResetAfter time.Duration
 }
 
 // Limiter keeps one token bucket per client. Its mutex protects both the map
@@ -39,6 +40,11 @@ func newLimiter(capacity int, refillRate float64, now func() time.Time) (*Limite
 	}, nil
 }
 
+// Capacity returns the configured maximum number of tokens per client.
+func (l *Limiter) Capacity() int {
+	return l.capacity
+}
+
 // Allow checks and updates the bucket for client as one atomic operation.
 func (l *Limiter) Allow(client string) Decision {
 	l.mu.Lock()
@@ -56,5 +62,6 @@ func (l *Limiter) Allow(client string) Decision {
 		Allowed:    allowed,
 		Remaining:  remaining,
 		RetryAfter: retryAfter,
+		ResetAfter: bucket.timeUntilFull(),
 	}
 }
