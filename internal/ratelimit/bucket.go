@@ -11,10 +11,11 @@ var errInvalidBucketConfig = errors.New("capacity and refill rate must be positi
 // Bucket implements a token bucket. Callers provide the current time so the
 // algorithm can be tested without sleeping and can be composed with a limiter.
 type Bucket struct {
-	capacity   float64
-	refillRate float64 // tokens per second
-	tokens     float64
-	lastRefill time.Time
+	capacity     float64
+	refillRate   float64 // tokens per second
+	tokens       float64
+	lastRefill   time.Time
+	lastActivity time.Time
 }
 
 // NewBucket creates a full bucket with the given capacity and refill rate.
@@ -27,10 +28,11 @@ func newBucketAt(capacity int, refillRate float64, now time.Time) (*Bucket, erro
 		return nil, errInvalidBucketConfig
 	}
 	return &Bucket{
-		capacity:   float64(capacity),
-		refillRate: refillRate,
-		tokens:     float64(capacity),
-		lastRefill: now,
+		capacity:     float64(capacity),
+		refillRate:   refillRate,
+		tokens:       float64(capacity),
+		lastRefill:   now,
+		lastActivity: now,
 	}, nil
 }
 
@@ -38,6 +40,7 @@ func newBucketAt(capacity int, refillRate float64, now time.Time) (*Bucket, erro
 // It returns whether the request was allowed, whole tokens remaining, and the
 // wait until one token is available (zero when allowed).
 func (b *Bucket) Allow(now time.Time) (allowed bool, remaining int, retryAfter time.Duration) {
+	b.lastActivity = now
 	elapsed := now.Sub(b.lastRefill).Seconds()
 	if elapsed > 0 {
 		b.tokens = math.Min(b.capacity, b.tokens+elapsed*b.refillRate)
