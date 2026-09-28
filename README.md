@@ -2,7 +2,7 @@
 
 An educational implementation of a **per-client token bucket** in Go, with HTTP middleware, concurrency control, and inactive-client cleanup. The algorithm uses only the standard library and does not depend on a third-party rate-limiting package.
 
-> **Project status:** this repository contains the `internal/ratelimit` and `internal/httpapi` packages and their tests. It does not yet contain a runnable `cmd/server` program, a Dockerfile, CI, or benchmarks. The example below shows how to integrate the middleware into a server in the same module. Rate-limit state is local to one process.
+> **Project status:** this repository contains the limiter, HTTP middleware, and a runnable demo server in `cmd/server`. It does not yet contain a Dockerfile, CI, or benchmarks. Rate-limit state is local to one process.
 
 ## The problem
 
@@ -28,7 +28,7 @@ Check the client's bucket under the mutex
    +-- bucket empty ----> 429 + Retry-After
 ```
 
-The algorithm is in [`internal/ratelimit/bucket.go`](internal/ratelimit/bucket.go). [`internal/ratelimit/limiter.go`](internal/ratelimit/limiter.go) stores buckets by client ID and returns a `Decision` with `Allowed`, `Remaining`, `RetryAfter`, and `ResetAfter`. [`internal/httpapi/middleware.go`](internal/httpapi/middleware.go) turns that decision into an HTTP response.
+The algorithm is in [`internal/ratelimit/bucket.go`](internal/ratelimit/bucket.go). [`internal/ratelimit/limiter.go`](internal/ratelimit/limiter.go) stores buckets by client ID and returns a `Decision` with `Allowed`, `Remaining`, `RetryAfter`, and `ResetAfter`. [`internal/httpapi/middleware.go`](internal/httpapi/middleware.go) turns that decision into an HTTP response. [`cmd/server/main.go`](cmd/server/main.go) wires the middleware into a small executable.
 
 ## Concurrency
 
@@ -57,42 +57,21 @@ This approach reduces accumulation of old clients, but it does not impose a stri
 
 Accepted requests reach the next handler, which determines the success status. Rejected requests receive `429 Too Many Requests` and do not reach the handler. The `RateLimit-*` headers are informational under the definitions above; this implementation **does not claim full compliance with an HTTP rate-limit specification**. Because durations are rounded up to whole seconds, `Retry-After` can be conservative.
 
-## Use in a server
+## Run the demo server
 
-The repository does not yet include a runnable demo server. Within this module, a `main.go` file can use the middleware as follows:
+From the repository root, run `go run ./cmd/server`. It listens on `:8080` by default. The `/health` route is outside the rate limit; `GET /api/v1/resource` is protected. Configure the server with command-line flags:
 
-```go
-package main
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `-addr` | `:8080` | HTTP listen address, including port. |
+| `-capacity` | `3` | Maximum tokens per client. |
+| `-refill-rate` | `1` | Tokens refilled per second. |
+| `-inactivity-ttl` | `15m` | Time without requests before a bucket expires. |
+| `-cleanup-interval` | `1m` | Minimum time between cleanup scans. |
 
-import (
-    "log"
-    "net/http"
-    "time"
+For example, `go run ./cmd/server -addr 127.0.0.1:8080 -capacity 5 -refill-rate 0.5`. Invalid values fail at startup. The server uses structured logs, a five-second HTTP header read timeout, and a five-second graceful shutdown deadline after Ctrl+C or `SIGTERM`. Cleanup is request-triggered, so no worker needs to be stopped.
 
-    "github.com/k11ngp1ng/rate-limiter/internal/httpapi"
-    "github.com/k11ngp1ng/rate-limiter/internal/ratelimit"
-)
-
-func main() {
-    limiter, err := ratelimit.NewLimiterWithCleanup(3, 1, 15*time.Minute, time.Minute)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    mux := http.NewServeMux()
-    mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-        w.WriteHeader(http.StatusOK)
-    })
-    resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        _, _ = w.Write([]byte("resource\n"))
-    })
-    mux.Handle("GET /api/v1/resource", httpapi.RateLimit(limiter, httpapi.RemoteAddrClientID)(resource))
-
-    log.Fatal(http.ListenAndServe(":8080", mux))
-}
-```
-
-Save the example as `cmd/server/main.go` inside the module and run `go run ./cmd/server`. The `/health` route is outside the rate limit. To observe the limit, make four quick requests from the same client:
+To observe the limit with default settings, make four quick requests from the same client:
 
 ```sh
 curl -i http://localhost:8080/health
@@ -102,21 +81,21 @@ curl -i http://localhost:8080/api/v1/resource
 curl -i http://localhost:8080/api/v1/resource
 ```
 
-The first three resource requests should be accepted if they arrive before a refill; the fourth may receive `429` with `Retry-After`. Timing between requests affects the outcome. This is only a minimal integration example; a production server also needs configuration, timeouts, logging, and graceful shutdown.
+The first three resource requests should be accepted if they arrive before a refill; the fourth may receive `429` with `Retry-After`. Timing between requests affects the outcome. The demo is intentionally small and does not include TLS or a trusted proxy configuration.
 
 ## Tests and measurement
 
 Requires Go **1.22 or later**. From the repository root:
 
 ```sh
-gofmt -w internal
+gofmt -w cmd internal
 go vet ./...
 go test ./...
 go test -race ./...
 go build ./...
 ```
 
-The tests in `bucket_test.go`, `limiter_test.go`, and `middleware_test.go` cover consumption, fractional refill, the capacity ceiling, client isolation, concurrency, cleanup, HTTP status codes, and headers. `go test` checks behavior; `go test -race` detects unsafe concurrent access exercised by the tests. A load test or benchmark measures performance and does not replace these checks.
+The tests in `bucket_test.go`, `limiter_test.go`, `middleware_test.go`, and `main_test.go` cover consumption, fractional refill, the capacity ceiling, client isolation, concurrency, cleanup, HTTP status codes, headers, configuration, routing, and cancellation. `go test` checks behavior; `go test -race` detects unsafe concurrent access exercised by the tests. A load test or benchmark measures performance and does not replace these checks.
 
 The repository does not yet contain benchmarks or published results. Once benchmarks are added, run them separately with `go test -run '^$' -bench=. -benchmem ./internal/ratelimit` and record the command, configuration, Go version, and machine before interpreting the numbers. To generate concurrent traffic against an integrated server, an external tool such as `hey` or `vegeta` can be used optionally; compare `2xx` and `429` responses and repeat with more than one client. This README reports no unmeasured performance numbers.
 
@@ -126,6 +105,6 @@ The repository does not yet contain benchmarks or published results. Once benchm
 - IP-based identification can group users behind NAT. Proxy headers require an explicit trust policy.
 - TTL cleanup removes old clients but does not cap the number of active clients or new clients arriving in a burst. An attacker could exploit high-cardinality client IDs.
 - A map sweep runs within a request. Measure its cost before changing the synchronization or cleanup strategy.
-- A versioned demo server with graceful shutdown, benchmarks, CI, and deployment packaging are still future milestones, not delivered features.
+- Benchmarks, CI, and deployment packaging are still future milestones, not delivered features.
 
 The design favors short, observable code: an in-house algorithm, no third-party dependencies, one mutex, and opportunistic cleanup. Before optimizing, validate correctness, run the race detector, and measure a representative workload.
